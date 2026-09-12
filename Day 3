@@ -1,0 +1,25 @@
+# Day 3 Tasks — Tabs 2 & 3 + Shop Details
+
+- `[ ]` Database Functions & Views (SQL for Supabase)
+  - `[ ]` `log_empties_against_invoice(shop_id, invoice_id, product_name, quantity, deposit_amount)` — postgres function/trigger or logic for logging empties
+  - `[ ]` View for empties on hand
+- `[ ]` Server Actions
+  - `[ ]` `src/lib/actions/shops.ts` — Retailer list, blocked accounts, unblock, record payment, block shop, import shops, get shop invoices, shop details by ID, etc.
+  - `[ ]` `src/lib/actions/inventory.ts` — Warehouse stock, Flappy/damaged stock, Returns/wayback, Stock count/audits, Empties log
+- `[ ]` Tab 2: Credit Control Pages
+  - `[ ]` Page 1: Retailer Credit & Cash Shops (`/tab2/retailers`): Main table with `Terms`, Block Shop (with reason), Record Payment, Unpaid sub-page (Days Past Due), Outlet Code search, Export
+  - `[ ]` Page 2: Blocked Accounts (`/tab2/blocked`): List with unblock action, Export
+- `[ ]` Tab 3: Inventory Control Pages
+  - `[ ]` Page 1: Warehouse Stock (`/tab3/warehouse`): Product list (no Empties column), Add/Edit/Delete, Export
+  - `[ ]` Page 2: Flappy/Damaged Stock (`/tab3/damaged`): Dropdown for products/status, no auto-ledger write or auto-pending row, Edit/Delete, Export
+  - `[ ]` Page 3: Returns/Wayback (`/tab3/returns`): Reason required for Rejected, view reason in dropdown/modal, Approve restores stock
+  - `[ ]` Page 4: Stock Count/Audit (`/tab3/audit`): Schedule -> Start Count -> Complete Audit (adjusts warehouse qty), View Report
+  - `[ ]` Page 5: Empties Log (`/tab3/empties`): Add empties form with Invoice No lookup, Edit/Delete, Export
+- `[ ]` Shop Details & Profile Pages
+  - `[ ]` Shop Details List (`/shops`): On Cash vs On Credit UI toggle at top, separate search + import by outlet_code, Outlet Code as leading column
+  - `[ ]` Shop Profile (`/shops/[id]`):
+    - Cash shops: Date/Month/Year filters (current preselected), invoice table
+    - Credit shops: Date/Month/Year filters (current preselected), Credit/Cash invoices toggle. Credit view shows Aging Days and Bucket as two separate columns, Payment status (Paid/Partial/Outstanding)
+- `[ ]` Verification
+  - `[ ]` Build check & TypeScript validation passes
+  - `[ ]` All UI components render properly

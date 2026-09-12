@@ -1,0 +1,370 @@
+# MDOS — Day 4 & 5 Implementation Plan
+
+## Current State Assessment
+
+Days 1–3 are **complete**. The following exists:
+
+| Layer | What's there |
+|---|---|
+| DB schema | All tables from v7 + v8 + day2 triggers + day3 patches are applied in Supabase |
+| Routes | `(distributor)/tab1`, `tab2`, `tab3`, `shop-details` pages exist |
+| Server Actions | `invoices.ts`, `shops.ts`, `routes.ts`, `inventory.ts`, `late-delivery.ts` |
+| Components | `ui/`, `layout/` (Sidebar + TopBar), `invoice/`, `export/` |
+| Admin | `admin/layout.tsx` + `admin/dashboard/` only (no tenants/[id], settings, logs) |
+| Missing routes | `tab4/`, `tab5/`, `tab6/`, `tab7/`, `settings/`, full admin pages |
+| Missing DB | `cash_deposits` table, `day4_schema.sql` pg_cron functions |
+
+---
+
+## Day 4 — Tab 4, Tab 6, Tab 5 + pg_cron Jobs
+
+### What Gets Built
+
+#### A. `supabase/day4_schema.sql` — DB additions
+
+1. **`cash_deposits` table** — if not already present from v7 (check v7 schema lines 400+)
+2. **`ccbpl_purchases` table** — PO tracking with `in_progress` / `stock_arrived` status
+3. **`agency_expenses` table** — day-to-day running costs
+4. **`agency_ledger` table** — running balance with negative-balance model
+5. **`ccbpl_penalties` table** — penalty register (may already exist; idempotent patch)
+6. **`mark_stock_arrived()` function** — atomic: `qty_total += received_qty` + agency_ledger post
+7. **`check_late_deliveries()` function** — pg_cron Job 1 (nightly)
+8. **`job_cash_not_deposited_check()` function** — already in v8_all_fixes; pg_cron Job 2 (hourly) schedule registration
+9. **pg_cron registrations** — `cron.schedule()` calls for both jobs
+
+#### B. Server Actions
+
+| File | New functions |
+|---|---|
+| `lib/actions/cash.ts` | `getDailySummary()`, `getDailySummaryDrillDown()`, `getDeposits()`, `addDeposit()`, `updateDeposit()`, `deleteDeposit()`, `getReconciliation()` |
+| `lib/actions/ccbpl.ts` | `getPurchases()`, `addPurchase()`, `updatePurchase()`, `deletePurchase()`, `markStockArrived()`, `getExpenses()`, `addExpense()`, `updateExpense()`, `deleteExpense()`, `getPenalties()`, `addPenalty()`, `updatePenalty()`, `deletePenalty()`, `disputePenalty()` |
+| `lib/actions/ledger.ts` | `getLedger()`, `addRevenue()` |
+| `lib/actions/backup.ts` | `getBackups()`, `createBackup()` |
+| `app/api/backup/route.ts` | POST handler — dumps tenant rows; returns signed URL |
+
+#### C. Pages
+
+| Route | Blueprint Section |
+|---|---|
+| `(distributor)/tab4/daily-summary/page.tsx` | Tab 4 Page 1 — Daily Summary + drill-down modal |
+| `(distributor)/tab4/deposits/page.tsx` | Tab 4 Page 2 — Cash Deposit Register |
+| `(distributor)/tab4/reconciliation/page.tsx` | Tab 4 Page 3 — Cash Reconciliation Dashboard (2 rows only) |
+| `(distributor)/tab5/backup/page.tsx` | Tab 5 Page 1 — Backup Status |
+| `(distributor)/tab6/ledger/page.tsx` | Tab 6 Page 1 — Agency Ledger |
+| `(distributor)/tab6/purchasing/page.tsx` | Tab 6 Page 2 — Purchasing from CCBPL |
+| `(distributor)/tab6/expenses/page.tsx` | Tab 6 Page 3 — Agency Expenses |
+| `(distributor)/tab6/penalties/page.tsx` | Tab 6 Page 4 — CCBPL Penalties Register |
+
+---
+
+### Detailed Page Specs
+
+#### Tab 4 Page 1 — Daily Summary
+
+- **Table columns**: Date · DM · Route · Cash Invoices · Expected (Rs.) · Submitted (Rs.) · Difference · Status
+- **Status badge**: `OK` (green) / `SHORTFALL` (red)
+- **Filters**: Date picker
+- **Drill-down modal** (click any row): Invoice No · Shop · Type · Grand Total · Visit · Delivery · Reason · Submitted · Diff · Status · **Edit / Delete**
+- **Edit** inside drill-down updates `invoices.visit_status`, `delivery_status`, `reason`, `amount_received`
+- **Export CSV + Excel** on main table
+
+> [!IMPORTANT]
+> Grand Total is used (not total_amount). The Confirm. column does NOT exist. Edit/Delete are in the drill-down table.
+
+#### Tab 4 Page 2 — Cash Deposit Register
+
+- **Table columns**: Deposit Date · Amount · Bank · Bank Ref No · For Date · Status · **Edit / Delete**
+- **Add Deposit**: Amount pre-filled from that day's total Submitted (Page 1 total); For Date pre-filled; only Bank Name + Bank Ref No typed
+- **Edit rules**: changing Amount requires a typed reason (stored in `amount_change_reason`); Amount change does NOT cascade to any other table
+- **Filters**: Date picker
+- **Export CSV + Excel**
+
+#### Tab 4 Page 3 — Cash Reconciliation Dashboard
+
+- **Exactly 2 rows**: `Cash Invoices Delivered` and `Bank Deposited`
+- **Columns**: Step in Chain · Date · This Week · Month · Gap · Status
+- **Filters**: Date picker only + Status dropdown (All / SHORTFALL only)
+- No Year filter
+- **Export CSV + Excel**
+
+#### Tab 5 Page 1 — Backup Status
+
+- **Table**: Backup Date · Status · Triggered By · Action (Download)
+- **Backup Now** button → POST to `/api/backup`; creates a record in `backups` table
+- **Download** → signed URL from Supabase storage (or a Blob if using JSON export)
+- No Module/Size columns; no second page; no cron
+
+#### Tab 6 Page 1 — Agency Ledger
+
+- **Table**: Date · Description · Amount In · Balance
+- **Balance**: negative-balance model — starts negative, Add Revenue reduces magnitude
+- **Add Revenue**: Date, Description, Amount In; `entry_type = 'revenue'`
+- **Export CSV + Excel**
+
+#### Tab 6 Page 2 — Purchasing from CCBPL
+
+- **Table**: PO No · Product · Ordered Qty · Received Qty · Billed · Status · **Edit / Delete**
+- **Status values ONLY**: `In Progress` / `Stock Arrived` (no "Under Review" / "Complaint Submitted")
+- **No Flappy Qty column anywhere** on this page
+- **Mark Stock Arrived** button (In Progress rows only) → calls `markStockArrived()` → atomic DB function
+- **In Progress**: zero writes to warehouse_stock or agency_ledger
+- **Stock Arrived**: `qty_total += received_qty` + agency_ledger purchase entry, both in one DB transaction
+- **Export CSV + Excel**
+
+#### Tab 6 Page 3 — Agency Expenses
+
+- **Table**: Date · Category · Description · Amount · Paid By · **Edit / Delete**
+- **Add Expense**: all fields required; Category is a dropdown (Fuel / Maintenance / Salary / Miscellaneous / Other)
+- **Edit / Delete** per row
+- **Export CSV + Excel**
+
+#### Tab 6 Page 4 — CCBPL Penalties Register
+
+- **Table**: Date · CCBPL Ref · Amount · Reason · Status · **Edit / Delete**
+- **Status values**: Pending / Disputed / Paid / Resolved
+- **Dispute** action: requires typed note; sets status to `disputed`
+- **Edit / Delete** per row
+- **Export CSV + Excel**
+
+---
+
+### pg_cron Jobs (Day 4 SQL)
+
+```sql
+-- Job 1: Nightly late delivery check (runs at 00:05 each day)
+select cron.schedule(
+  'check_late_deliveries',
+  '5 0 * * *',
+  'select check_late_deliveries()'
+);
+
+-- Job 2: Hourly cash not deposited check
+select cron.schedule(
+  'check_cash_not_deposited',
+  '0 * * * *',
+  'select job_cash_not_deposited_check()'
+);
+```
+
+> [!NOTE]
+> `job_cash_not_deposited_check()` already exists in `mdos_v8_all_fixes.sql`. Only the `cron.schedule()` call needs to be added. `check_late_deliveries()` is new — copies invoice's actual delivery_status (not hardcoded 'pending').
+
+---
+
+### Day 4 End-of-Day Test
+
+- Full cash day flow: Tab 4 P1 daily totals → Cash Deposit → Reconciliation shows shortfall on Bank Deposited row only
+- CCBPL purchase: set In Progress → stock unchanged, ledger unchanged; Mark Stock Arrived → both update
+- Tab 6 Page 2 has zero Flappy Qty columns
+- Backup Now creates a record; Download produces a link
+
+---
+
+## Day 5 — Tab 7, Settings, Admin Panel, Deploy
+
+### What Gets Built
+
+#### A. `supabase/day5_schema.sql` — DB additions
+
+1. **`tenant_settings` table** — if not in v7 (auto_assign_enabled, plus alert thresholds — may be `tenant_alert_settings`)
+2. **`admin_logs` table** — session-grouped access log (already in v8 patch with `visited_pages[]`)
+3. **`emergency_banners` table** — text + is_active flag for admin global banner
+4. **Verify**: `global_feature_flags` + `tenant_feature_flags` tables exist and are seeded
+5. **Verify**: `global_alert_settings` table exists (from v8_all_fixes FIX 8)
+
+#### B. Server Actions
+
+| File | New functions |
+|---|---|
+| `lib/actions/settings.ts` | `getSettings()`, `updateAutoAssign()`, `getAlertSettings()`, `updateAlertSettings()` |
+| `lib/actions/admin.ts` | `getTenants()`, `createTenant()`, `updateTenant()`, `deleteTenant()`, `toggleAccess()`, `getTenantConfig()`, `updateTenantFlags()`, `getGlobalFlags()`, `updateGlobalFlag()`, `getGlobalAlertSettings()`, `updateGlobalAlertSetting()`, `getLogs()`, `deleteLog()`, `getAdminStats()`, `getBanner()`, `setBanner()`, `deactivateBanner()` |
+| `lib/actions/alerts.ts` | `getAlerts()`, `markAlertRead()` |
+| `lib/actions/discrepancy.ts` | `getDiscrepancyReport()`, `updateDiscrepancy()` |
+| `lib/actions/realtime.ts` | (client-side only — Supabase Realtime subscription hook) |
+
+#### C. Pages & Components
+
+| Route / Component | Blueprint Section |
+|---|---|
+| `(distributor)/tab7/discrepancy/page.tsx` | Tab 7 Page 1 — Stock Discrepancy Report |
+| `(distributor)/tab7/alerts/page.tsx` | Tab 7 Page 2 — Real-Time Alerts Feed |
+| `(distributor)/settings/page.tsx` | System Settings (Sections 2 & 3) |
+| `admin/dashboard/page.tsx` | **Rebuild** — full CRUD + Export to Excel |
+| `admin/tenants/[id]/page.tsx` | Distribution Config Board |
+| `admin/settings/page.tsx` | Global settings (Tabs/Pages + Alert toggles + Emergency Banner) |
+| `admin/logs/page.tsx` | Session-grouped access log |
+| `components/realtime/AlertsFeed.tsx` | Supabase Realtime client component |
+
+---
+
+### Detailed Page Specs
+
+#### Tab 7 Page 1 — Stock Discrepancy Report
+
+- **Filters**: only products where `physical_qty ≠ system_qty` (Diff ≠ 0)
+- **Table**: Product · System Qty · Physical Qty · Diff · Audit Date · Status · **Edit / Delete**
+- **Edit**: Status dropdown (Resolved / Disputed); **Resolved requires typed reason**; Disputed does not
+- **Export CSV + Excel**
+
+> [!IMPORTANT]
+> Products where Diff = 0 are **excluded entirely**. The page queries `stock_audit_items` joined to `stock_audits`, filtering where `system_qty ≠ physical_qty`.
+
+#### Tab 7 Page 2 — Real-Time Alerts Feed
+
+- **Supabase Realtime** subscription inside `AlertsFeed` client component (channel: `alerts:tenant_id=eq.<id>`)
+- **Table**: Time · Alert Type · Details · Severity · Status · **Mark Read**
+- **Alert types ONLY**: `cash_not_deposited` / `overdue_threshold` (no delivery_dispute)
+- **Mark Read** is the only action — no Resolved/Disputed, no reason
+- **Export CSV + Excel**
+
+#### System Settings Page
+
+- **Section 2 — Global Features**: Auto-Assign toggle → writes `tenant_settings.auto_assign_enabled`
+- **Section 3 — Alert Configuration**:
+  - Cash Not Deposited toggle + "Set Hrs" input → `tenant_alert_settings.cash_not_deposited_enabled` + `cash_not_deposited_hours`
+  - Overdue Threshold toggle + "Set Days" input → `tenant_alert_settings.overdue_alert_enabled` + `overdue_alert_days` (default 0)
+- No Section 1 (global tabs — that's admin only)
+
+#### Admin Dashboard (`/admin/dashboard`)
+
+- **Table**: Distro Name · Phone No. · Email · Access (toggle) · Created · Last Edit · **Edit / Delete**
+- **Phone No. required** — form validation enforces NOT NULL
+- **Search** by name or phone; **Filter** by Enabled/Disabled + date
+- **Add Distribution** — creates `tenants` row + sets Clerk `public_metadata.tenant_id` via Admin API (or manual step documented in UI)
+- **Edit / Delete** per row
+- **Export to Excel** (not CSV — admin export is Excel only per blueprint)
+
+#### Admin Tenants Config (`/admin/tenants/[id]`)
+
+- **No Notifications toggle** — removed in v7
+- **Tabs & Pages matrix**: 8 flags (tab1–tab7 + shop_details) — toggles write to `tenant_feature_flags`
+- **Read-only mirror** of the 2 global alert settings (`global_alert_settings`)
+- **No per-tenant alert override** — mirrors only
+
+#### Admin Settings (`/admin/settings`)
+
+- **Section 1 — Global Tabs & Pages**: same 8 flags — writes to `global_feature_flags`
+- **Section 2 — Global Alert Settings**: 2 toggles — writes to `global_alert_settings`
+- **Emergency Banner**: text box + Activate button → `emergency_banners` row; Deactivate clears `is_active`
+- **No Global Notifications section**
+
+#### Admin Logs (`/admin/logs`)
+
+- **Table**: PK · Timestamp · Pages Visited (count, expandable ▾ list) · IP Address · MDOS User · Distribution · **Delete**
+- **Search**: by IP, date, PKT time
+- **Export to Excel**
+
+---
+
+### Day 5 Verification
+
+#### Automated
+```bash
+npm run lint
+npx tsc --noEmit
+# Then Snyk scan via MCP tool
+```
+
+#### Manual Change Log Tests (from implementation_plan.md)
+
+| Test | Pass condition |
+|---|---|
+| Tab 3 Page 1: no Empties column | Column absent from warehouse table |
+| Tab 3 Page 5: Empties Log | Page renders; Add form validates Invoice No |
+| Tab 3 Page 3: View button | Clicking View shows reason inline (Rejected); "No reason" for Approved |
+| Tab 4 Page 1 drill-down: Edit/Delete | Both buttons present per row |
+| Tab 4 Page 2: Edit/Delete | Both buttons present per row |
+| Tab 4 Page 3: no Cash Submitted row | Table has exactly 2 rows |
+| Tab 6 Page 2: In Progress → Stock Arrived | Stock unchanged at In Progress; updates at Stock Arrived |
+| Tab 6 Page 2: no Flappy Qty | Column absent from purchasing table |
+| Tab 1 Page 1: Preseller column | Column visible in invoice table |
+| Tab 2 Page 1: Terms column | Column visible |
+| Shop Details: UI switch | Toggle renders; only one table visible at a time |
+| On-Credit Profile: Aging Days + Bucket | Two separate columns |
+| Payment: Partial status | Rows with partial payment show "Partial" badge |
+| Admin dashboard: Edit/Delete | Both buttons per row |
+| Admin dashboard: Phone No. required | Form rejects empty Phone No. |
+| Alerts: only 2 types | `alert_type` CHECK allows only `cash_not_deposited` and `overdue_threshold` |
+| Alerts: Mark Read only | No Resolved/Disputed buttons on Tab 7 Page 2 |
+
+#### Deploy to Vercel
+- Set production Supabase env vars in Vercel
+- Run full Part B narrative (invoice → stock → truck → delivery → money → summaries) on live data
+
+---
+
+## Open Questions
+
+> [!IMPORTANT]
+> **`cash_deposits` table** — Need to confirm whether this table was created in the v7 schema (lines 400–600 not fully reviewed). The day4_schema.sql will use `CREATE TABLE IF NOT EXISTS` to be safe.
+
+> [!IMPORTANT]
+> **Backup implementation** — Blueprint says "secure link". Recommend: `/api/backup` POST handler serializes all tenant tables to JSON, uploads to Supabase Storage bucket `backups/{tenant_id}/{timestamp}.json`, returns a signed URL valid for 24 hours. Confirm this approach before building.
+
+> [!IMPORTANT]
+> **Admin → Clerk tenant linking** — When Admin creates a new tenant, the Distributor's Clerk `public_metadata.tenant_id` must be set. This requires Clerk's Backend API (secret key). The UI should display the `tenant_id` UUID so the Admin can manually set it via Clerk Dashboard if the backend API is unavailable. Confirm: do we wire the Clerk Backend API, or document the manual step?
+
+---
+
+## Proposed Changes — File List
+
+### Day 4
+
+#### [NEW] `e:/MDOS/supabase/day4_schema.sql`
+New tables: `cash_deposits` (if missing), `ccbpl_purchases`, `agency_expenses`. New functions: `mark_stock_arrived()`, `check_late_deliveries()`. pg_cron schedule registrations.
+
+#### [NEW] `e:/MDOS/src/app/(distributor)/tab4/daily-summary/page.tsx`
+#### [NEW] `e:/MDOS/src/app/(distributor)/tab4/deposits/page.tsx`
+#### [NEW] `e:/MDOS/src/app/(distributor)/tab4/reconciliation/page.tsx`
+#### [NEW] `e:/MDOS/src/app/(distributor)/tab5/backup/page.tsx`
+#### [NEW] `e:/MDOS/src/app/(distributor)/tab6/ledger/page.tsx`
+#### [NEW] `e:/MDOS/src/app/(distributor)/tab6/purchasing/page.tsx`
+#### [NEW] `e:/MDOS/src/app/(distributor)/tab6/expenses/page.tsx`
+#### [NEW] `e:/MDOS/src/app/(distributor)/tab6/penalties/page.tsx`
+#### [NEW] `e:/MDOS/src/app/api/backup/route.ts`
+#### [NEW] `e:/MDOS/src/lib/actions/cash.ts`
+#### [NEW] `e:/MDOS/src/lib/actions/ccbpl.ts`
+#### [NEW] `e:/MDOS/src/lib/actions/ledger.ts`
+#### [NEW] `e:/MDOS/src/lib/actions/backup.ts`
+
+### Day 5
+
+#### [NEW] `e:/MDOS/supabase/day5_schema.sql`
+Verifies/adds: `emergency_banners` table. Seeds any missing feature flag rows.
+
+#### [NEW] `e:/MDOS/src/app/(distributor)/tab7/discrepancy/page.tsx`
+#### [NEW] `e:/MDOS/src/app/(distributor)/tab7/alerts/page.tsx`
+#### [NEW] `e:/MDOS/src/app/(distributor)/settings/page.tsx`
+#### [MODIFY] `e:/MDOS/src/app/admin/dashboard/page.tsx` — full rebuild with Edit/Delete/Export
+#### [NEW] `e:/MDOS/src/app/admin/tenants/[id]/page.tsx`
+#### [NEW] `e:/MDOS/src/app/admin/settings/page.tsx`
+#### [NEW] `e:/MDOS/src/app/admin/logs/page.tsx`
+#### [NEW] `e:/MDOS/src/components/realtime/AlertsFeed.tsx`
+#### [NEW] `e:/MDOS/src/lib/actions/settings.ts`
+#### [NEW] `e:/MDOS/src/lib/actions/admin.ts`
+#### [NEW] `e:/MDOS/src/lib/actions/alerts.ts`
+#### [NEW] `e:/MDOS/src/lib/actions/discrepancy.ts`
+
+---
+
+## Execution Order
+
+### Day 4
+1. Write `day4_schema.sql` → user runs in Supabase SQL Editor
+2. Write `lib/actions/cash.ts` + `lib/actions/ccbpl.ts` + `lib/actions/ledger.ts` + `lib/actions/backup.ts`
+3. Build Tab 4 pages (daily-summary → deposits → reconciliation)
+4. Build Tab 5 backup page + `/api/backup` route
+5. Build Tab 6 pages (ledger → purchasing → expenses → penalties)
+6. Snyk scan mid-way; fix any findings
+
+### Day 5
+1. Write `day5_schema.sql` → user runs in Supabase SQL Editor
+2. Write `lib/actions/settings.ts` + `lib/actions/admin.ts` + `lib/actions/alerts.ts` + `lib/actions/discrepancy.ts`
+3. Build Tab 7 pages
+4. Build Settings page
+5. Build all admin pages
+6. Build `AlertsFeed` realtime component
+7. Run full test script (Change Log tests)
+8. `npm run lint` + `npx tsc --noEmit`
+9. Snyk scan + fix + rescan
+10. Deploy to Vercel
