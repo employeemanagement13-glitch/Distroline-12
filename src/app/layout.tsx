@@ -11,7 +11,7 @@ const poppins = Poppins({
 });
 
 export const metadata: Metadata = {
-  title: "MDOS Portal",
+  title: "Distroline - Your Distribution Management System",
   description: "Distribution Management System",
 };
 
